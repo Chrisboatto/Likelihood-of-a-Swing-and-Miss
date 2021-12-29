@@ -1,0 +1,255 @@
+---
+title: "Untitled"
+author: "Christopher Boatto"
+date: "21/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+# Packages required for the model creation.
+
+```{r}
+require(dplyr)
+require(ggplot2)
+require(corrplot)
+require(caret)
+require(stringr)
+require(rpart)
+require(ROCR)
+require(pROC)
+```
+
+# I loaded the data into RStudio and attached it for simplicity.
+
+```{r}
+PitchData <- read.csv(file.choose())
+attach(PitchData)
+```
+
+# Checked the structure as summary to gain insight. All pitch metrics are character attributes. That should be changed as those attributes need to be comprised of numeric values for the creation of the following charts and predictive model.
+
+```{r}
+str(PitchData)
+```
+
+```{r}
+summary(PitchData)
+```
+
+# Changed the pitch metrics into numeric attributes. NA's were introduced when changed which needs to be investigated.
+
+```{r}
+PitchData[15:24] <- sapply(PitchData[15:24], as.numeric)
+```
+
+# There is a maximum of 103 NA values in the pitch metric attributes. This likely has happened in the same observations therefore I will just omit them.
+
+```{r}
+summary(is.na(PitchData))
+```
+
+
+
+```{r}
+PitchData <- na.omit(PitchData)
+```
+
+# Checking again to see if there are no NA values. The omit function was successful.
+
+```{r}
+summary(is.na(PitchData))
+```
+
+# I relocated the release_spin_rate and spin_dir to the end of the table. This made creating the box plots easier.
+
+```{r}
+PitchData <- relocate(PitchData, release_spin_rate, .after = plate_z)
+PitchData <- relocate(PitchData, spin_dir, .after = release_spin_rate)
+```
+
+# I wanted to see the different pitches in the data frame. This allowed me to see how each pitch is categorized. There are NULL outputs within the Pitch_Type column but I am not sure if it is prudent to omit them. The model to be trained deals with Curveballs. 
+
+```{r}
+unique(PitchData$Pitch_Type)
+```
+
+# Created a boxplot to determine where the outliers are in the pitch metrics. Although there are outliers, these outcomes are real life possibilities, therefore I will not remove them.
+
+```{r}
+boxplot(PitchData[15:22], col = rainbow(14), main = "Box Plot of Pitch Metrics", xlab = "Categories", ylab = "Scores")
+boxplot(PitchData[23], col = 'blue', main = "Box Plot of Spin Rate", xlab = "Categories", ylab = "Scores")
+boxplot(PitchData[24], col = 'green', main = "Box Plot of Spin Direction", xlab = "Categories", ylab = "Scores")
+```
+
+# I created a binary column at the end of the data frame to show if the outcome was a swinging strike or not. The ultimate question at hand is to predict the likelihood of a swing and miss based on the characteristics of a curveball. Therefore, I need a binary column for swings and misses as my dependent variable.
+
+```{r}
+PitchData <- mutate(PitchData, SwingStrike = case_when(Pitch_Outcome == 'StrikeSwinging' ~ 1, Pitch_Outcome != 'StrikeSwinging' ~ 0))
+```
+
+# The plot below shows how well each pitch metric correlated with a swing and miss. Interestingly enough, there was no attribute that correlated highly to swings and misses.
+
+```{r}
+PitchesCor <- cor(PitchData[15:25])
+corrplot(PitchesCor, type = "upper", order = 'hclust', tl.col = "blue")
+```
+
+# I then sought out to create a visualization that displays Sam Freeman’s velocity by game. I first subset out only pitches that Sam threw and aggregated the release_speed using the averages by the Pitch_Type and Game_Date. This will give me the average velocities of each pitch by each game.
+
+```{r}
+Sam_Freeman <- filter(PitchData, Pitcher == 'Freeman, Sam')
+Sam_Freeman <- aggregate(release_speed ~ Pitch_Type + Pitcher + Game_Date, data = Sam_Freeman, FUN = mean)
+```
+
+```{r}
+unique(Sam_Freeman$Pitch_Type)
+Sam_Freeman <- filter(Sam_Freeman, Pitch_Type != 'NULL')
+unique(Sam_Freeman$Pitch_Type)
+```
+
+# The below charts show Sam's average velocities of his repertoire for each game and tracks it throughout the year for the 2018 season.
+
+```{r}
+ggplot(Sam_Freeman, aes(x = Game_Date, y = release_speed, col = Pitch_Type, group = 1)) + geom_line(size = 1) + geom_point(size = 2) + facet_wrap(~Pitch_Type) + theme(axis.text.x = element_text(size = 8, angle = 90)) +  labs(title = "Sam Freeman Pitch Velocities by Game", subtitle = "2018 Season", x = "Game Day", y = "Velocity")
+```
+
+# To begin my model, I first subset out all the curveballs and create their own dataset.
+
+```{r}
+CurveBalls <- filter(PitchData, Pitch_Type == 'CB')
+```
+
+# I split the data set randomly in to train and test sets on 85:15 scale to remove bias. 
+
+```{r}
+set.seed(142356)
+
+train <- sample(nrow(CurveBalls), 0.70*nrow(CurveBalls), replace = FALSE)
+
+TrainSet <- CurveBalls[train,]
+TestSet <- CurveBalls[-train,]
+```
+
+# As my first model I chose to use a decision tree. The size of the Curveball data set played a role in this decision as it is quite small. I decided to use a quick modeling scheme that allowed me to classify whether the predicted outcome is a swing and miss.
+
+```{r}
+CB_DecsionTree <- rpart(SwingStrike ~ release_speed + release_extension + release_pos_x + release_pos_z + release_spin_rate + x_movement + z_movement + plate_x + plate_z + spin_dir, data = TrainSet, method = 'class')
+```
+
+# Below shows the importance of each attribute from the decision tree model. The greater the importance score, the more weight the metric had in the model’s learning. The chart shows that the two metrics that had the biggest effect on the outcome of a swing and miss on a curveball where the vertical movement and placement of the pitch. 
+
+```{r}
+baseImp <- varImp(CB_DecsionTree)
+baseImp
+```
+
+```{r}
+baseImp <- as.data.frame(baseImp)
+ggplot(baseImp, aes(Overall, row.names(baseImp))) + 
+  geom_bar(stat = "identity", width = 0.1, fill = "black") + 
+  geom_point(shape = 21, size = 3, colour = "black", fill = "green", stroke = 2) + 
+  labs(title = "Curveball Swing and Miss Importance", subtitle = 'Decision Tree', x = "Importance", y = "Variable")
+``` 
+
+# I then predicted the classification onto the Train and Test data sets, bound the scores to their respective data sets, and renamed the columns
+
+```{r}
+SwingStrike_train <- predict(CB_DecsionTree, TrainSet, type = 'class')
+SwingStrike_test <- predict(CB_DecsionTree, TestSet, type = "class")
+```
+
+```{r}
+TrainSet <- cbind(TrainSet, SwingStrike_train)
+TestSet <- cbind(TestSet, SwingStrike_test)
+```
+
+```{r}
+names(TrainSet)[names(TrainSet) == "SwingStrike_train"] <- "DecisionTreePred"
+names(TestSet)[names(TestSet) == "SwingStrike_test"] <- "DecisionTreePred"
+```
+
+# I checked the accuracy of the model using the matrix below and the accuracy test. This showed am 89% accuracy rating thus my model worked well.
+
+```{r}
+DT_table <- table(SwingStrikeFull$SwingStrike, SwingStrikeFull$DecisionTreePred)
+
+DT_table
+```
+
+```{r}
+accuracy_Test <- sum(diag(DT_table)) / sum(DT_table)
+accuracy_Test
+```
+
+# My next model that I created is the random forest model. Random Forest creates a ‘forest’ of decision trees where the output is the class selecting the most trees. This is done to remove bias within the data and gain the ideal output. Random Forest is one of the strongest predictive models that one can create.
+
+# I used the 'SwingStrike' metric as the dependent variable and used all the other pitch metrics as the independents.
+
+# I tuned the model until I obtained a model with high enough accuracy metrics without the showing of an overfit. I set the maxnodes to 5 to avoid the overfit of the model. 
+
+```{r}
+CB_RandomForest <- randomForest(SwingStrike ~ release_speed + release_extension + release_pos_x + release_pos_z + release_spin_rate + x_movement + z_movement + plate_x + plate_z + spin_dir, data = TrainSet, importance = TRUE, maxnodes = 5, ntrees = 50)
+```
+
+# Below is the importance chart of the random forest model. This chart is very similar to the decision tree importance chart, but the decision tree chart shows that vertical movement and spin rate played a big role in the model’s learning and output. Whereas the random forest chart shows that the vertical placement graded high but all others were graded roughly equal to each other. This leaves the placement as the plate_z metric as the only attribute with high importance.
+
+```{r}
+baseImp <- importance(CB_RandomForest)
+baseImp <- as.data.frame(baseImp)
+ggplot(baseImp, aes(IncNodePurity, row.names(baseImp))) + 
+  geom_bar(stat = "identity", width = 0.1, fill = "Dark Blue") + 
+  geom_point(shape = 21, size = 3, colour = "Dark Blue", fill = "White", stroke = 2) + 
+  labs(title = "Curveball Swing and Miss Importance", subtitle = 'Random Forest', x = "Importance", y = "Variable")
+```
+
+# The error graph below shows that after 50 trees the error score levels out around 0.102. 
+
+```{r}
+plot(CB_RandomForest, col = "green", main = "CB RandomForest Error Chart")
+```
+
+# I repeated the same predicting steps for the random forest model as I did for the decision tree above. 
+
+```{r}
+SwingTrain_pred <- predict(CB_RandomForest, TrainSet, type = "class")
+SwingTest_pred <- predict(CB_RandomForest, TestSet, type = "class")
+```
+
+```{r}
+TrainSet <- cbind(TrainSet, SwingTrain_pred)
+TestSet <- cbind(TestSet, SwingTest_pred)
+```
+
+```{r}
+names(TrainSet)[names(TrainSet) == "SwingTrain_pred"] <- "RandomForestPred"
+names(TestSet)[names(TestSet) == "SwingTest_pred"] <- "RandomForestPred"
+```
+
+# I created a Receiver Operator Characteristic (ROC) Curve and calculated the Area Under the Curve (AUC) below to show how well the model performed. Judging by the findings, the model performed well as the AUC was tabulated at 0.7822 giving a 78% model accuracy rating. The ROC had an curve to the top left corner showing that the model’s supervised learning worked well. Although this accruracy rating was good, the decision tree measurement exceeded the random forest one.
+
+
+```{r}
+roc_test <- roc(ifelse(TestSet$SwingStrike == "1", "1", "0"), as.numeric(TestSet$RandomForestPred))
+roc_train <- roc(ifelse(TrainSet$SwingStrike == "1", "1", "0"), as.numeric(TrainSet$RandomForestPred))
+plot(roc_test, col = "blue", main = "Curveball Swinging Strike Predict ROC Graph")
+lines(roc_train, col = "green")
+```
+
+# I bound both the Train and Test sets back together to create one full data set and see all the predictions from both models within one data set.
+
+```{r}
+SwingStrikeFull <- rbind(TrainSet, TestSet)
+```
+
+```{r}
+auc(SwingStrikeFull$SwingStrike, SwingStrikeFull$RandomForestPred)
+```
